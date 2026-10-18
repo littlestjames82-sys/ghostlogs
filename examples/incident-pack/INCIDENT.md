@@ -30,7 +30,7 @@ billing.errors.GatewayAuthError: 401 from gateway
 2026-10-13T22:18:00Z INFO  billing-api shutdown clean
 ```
 
-## Repeated lines (2 groups emitted of 2 duplicate groups, counts exact)
+## Repeated lines: 2 of 2 duplicate groups emitted (counts exact)
 
 - x15 (byte-identical x15), lines 2-16: 2026-10-13T22:14:05Z INFO  poll ok queue=payments depth=0
 - x5 (byte-identical x5), lines 17-21: 2026-10-13T22:15:00Z WARN  retry budget low for gateway stripe
@@ -38,9 +38,7 @@ billing.errors.GatewayAuthError: 401 from gateway
 ## What was not shown
 
 - Routine lines dropped: 0
-- Duplicate occurrences whose exemplar was not emitted: 0
-- Window lines that did not fit the budget: 0
+- Duplicate occurrences, exemplar not emitted: 0
+- Window lines not fitted: 0
 - Window lines past the storage cap: 0
-- Secret-shaped literals in emitted excerpts were redacted by shape; counts by shape are in manifest.json. Values are never printed.
-
-This pack is evidence, not a diagnosis. It shows what matched the pattern set, how often, and in what order.
+- Secret-shaped literals in emitted excerpts were redacted by shape; counts are in manifest.json. Values are never printed.

@@ -54,6 +54,8 @@ ANCHOR_SECTION_COST = 40
 MAX_GROUPS_IN_MANIFEST = 200
 MAX_WINDOWS_IN_MANIFEST = 500
 MAX_GROUPS_IN_DOC = 100
+MAX_BUCKETS_IN_MANIFEST = 1000
+MAX_BUCKETS_IN_DOC = 48
 
 LIMITS = [
     "Evidence only: this pack shows what matched, how often, and in "
@@ -80,6 +82,14 @@ LIMITS = [
     "states the tier on its face. Lines trimmed from a window "
     "to fit are counted under windows not fitted, never "
     "silently lost.",
+    "The evidence overview counts each matched line once, at its "
+    "highest matched severity, and once per pattern it matches in "
+    "the per-pattern tallies, so the per-pattern tallies can sum "
+    "to more than the matched-line total. Hour buckets use the "
+    "timestamps exactly as written (no timezone conversion, and "
+    "syslog timestamps carry no year in the source); matched lines "
+    "without a recognised timestamp are counted separately and "
+    "fall in no bucket.",
     "Secret-shape redaction is exact about lengths by design: "
     "the aws-access-key shape is AKIA or ASIA plus exactly 16 "
     "characters (20 in total, the same shape GhostSlice's guard "
@@ -93,6 +103,13 @@ LIMITS = [
 
 
 class _Redactor:
+    """Applies redact_line while a pack is written, tallying hits by shape.
+
+    A fresh instance per render attempt, so the counts in the shipped
+    manifest describe the shipped pack only, never a discarded tier
+    candidate. When disabled (--no-redact), text passes through
+    unchanged and no counts accrue.
+    """
     def __init__(self, enabled: bool):
         self.enabled = enabled
         self.counts: dict[str, int] = {}
@@ -108,6 +125,9 @@ class _Redactor:
 
 @dataclass
 class PackResult:
+    """What build_pack returns: where the pack was written, the
+    manifest dict exactly as written to manifest.json, and whether
+    the shipped pack is over its budget."""
     out_dir: Path
     manifest: dict
     over_budget: bool
@@ -323,6 +343,15 @@ def _assemble(analysis: Analysis, budget: int, tier: str,
 
 def build_pack(analysis: Analysis, out_dir, budget: int,
                patterns: list, redact: bool = True) -> PackResult:
+    """Write an incident pack for `analysis` into `out_dir` and return a PackResult.
+
+    Descends the budget tier ladder (see the module docstring),
+    writes INCIDENT.md and manifest.json, and reports over_budget
+    when even the anchors tier exceeds `budget`. `patterns` is the
+    loaded pattern list, recorded in the manifest. With
+    `redact=False` (--no-redact), excerpts are emitted unredacted
+    and the manifest records that redaction was disabled.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -401,6 +430,35 @@ def build_pack(analysis: Analysis, out_dir, budget: int,
             "last_line": _anchor_line(total, analysis.last_line_text, red),
             "first_timestamp": _anchor_ts(analysis.first_timestamp),
             "last_timestamp": _anchor_ts(analysis.last_timestamp),
+        },
+        # Evidence overview: exact tallies over the whole file,
+        # counted in the analyser before any claim decision. Counts
+        # only (bucket labels are timestamp prefixes, pattern ids
+        # come from the loaded pattern set); no line text is carried
+        # here, so the overview needs no redaction and adds none.
+        "summary": {
+            "matched_lines": analysis.matched_lines,
+            "by_severity": {
+                str(sev): analysis.severity_counts[sev]
+                for sev in sorted(analysis.severity_counts)},
+            "by_pattern": {
+                pid: analysis.pattern_counts[pid]
+                for pid in sorted(analysis.pattern_counts)},
+            "lines_with_timestamp": analysis.lines_with_timestamp,
+            "lines_without_timestamp":
+                total - analysis.lines_with_timestamp,
+            "matched_lines_without_timestamp":
+                analysis.matched_lines_without_timestamp,
+            "timeline": {
+                "granularity": "hour, from the timestamp exactly as "
+                               "written (no timezone conversion)",
+                "buckets": len(analysis.timeline_buckets),
+                "list_truncated":
+                    len(analysis.timeline_buckets)
+                    > MAX_BUCKETS_IN_MANIFEST,
+                "list": analysis.timeline_buckets[
+                    :MAX_BUCKETS_IN_MANIFEST],
+            },
         },
         "windows": {
             "matched": len(analysis.windows),
@@ -542,6 +600,55 @@ def _render_incident(a: Analysis, red: _Redactor, window_lines: dict,
                 f"(line {a.last_timestamp[1]})")
         if not a.first_timestamp:
             lines.append("- No recognised timestamps in this log.")
+    lines.append("")
+    lines.append("## Evidence overview")
+    lines.append("")
+    # The overview is summary statistics, not selected excerpts, so
+    # it renders at every tier; at the anchors tier (where only the
+    # mandatory minimum ships) it compacts to the counts alone and
+    # points at the manifest for the buckets and tallies, so the
+    # summary never crowds out the mandatory anchors it sits beside.
+    sev = ", ".join(
+        f"severity {s}: {a.severity_counts[s]}"
+        for s in sorted(a.severity_counts))
+    if a.matched_lines == 0:
+        lines.append(
+            "No lines matched the pattern set (see the error windows "
+            "section).")
+    elif tier == "anchors":
+        lines.append(
+            f"Matched lines: {a.matched_lines} of {a.total_lines} "
+            f"({sev}). Hour buckets and per-pattern tallies are in "
+            f"manifest.json.")
+    else:
+        pat = ", ".join(
+            f"{pid}: {a.pattern_counts[pid]}"
+            for pid in sorted(a.pattern_counts))
+        lines.append(
+            f"Matched lines: {a.matched_lines} of {a.total_lines} "
+            f"({sev}).")
+        lines.append(f"By pattern: {pat}.")
+        if a.timeline_buckets:
+            lines.append(
+                "Hour buckets (as written, no timezone conversion):")
+            for b in a.timeline_buckets[:MAX_BUCKETS_IN_DOC]:
+                lines.append(
+                    f"- {b['bucket']}: {b['lines']} lines, "
+                    f"{b['matched_lines']} matched"
+                    + (f", max severity {b['max_severity']}"
+                       if b['matched_lines'] else "")
+                    + f" (lines {b['first_line']}-{b['last_line']})")
+            if len(a.timeline_buckets) > MAX_BUCKETS_IN_DOC:
+                lines.append(
+                    f"- Plus {len(a.timeline_buckets) - MAX_BUCKETS_IN_DOC} "
+                    f"more hour buckets in manifest.json.")
+            if a.matched_lines_without_timestamp:
+                lines.append(
+                    f"- Plus {a.matched_lines_without_timestamp} matched "
+                    f"lines with no recognised timestamp (in no bucket).")
+        elif a.total_lines:
+            lines.append(
+                "No recognised timestamps, so no hour buckets.")
     lines.append("")
     lines.append(
         f"## Error windows ({len(emitted_windows)} emitted of "

@@ -43,6 +43,9 @@ _SPLIT_RE = re.compile(r"[A-Za-z0-9_]+|[^\w\s]")
 
 
 def _fallback_estimate(text: str) -> int:
+    """Uncalibrated fallback estimate, used only when GhostSlice is
+    not reachable. Splits on word/punctuation boundaries: one token
+    per short piece, ceil(len/4) per long piece."""
     if not text:
         return 0
     total = 0

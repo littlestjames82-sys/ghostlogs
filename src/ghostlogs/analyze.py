@@ -25,7 +25,8 @@ from pathlib import Path
 
 from functools import lru_cache
 
-from .patterns import NEEDLE_RE, Pattern, find_timestamp, is_continuation
+from .patterns import (NEEDLE_RE, Pattern, find_timestamp, hour_bucket,
+                       is_continuation)
 from .tokens import estimate_tokens
 
 MAX_STORED_WINDOW_LINES = 100_000  # across all windows, per run
@@ -34,6 +35,14 @@ TRACE_ABSORB_CAP = 200            # continuation lines per window
 
 @dataclass
 class Window:
+    """One error window: the lines claimed around a pattern match.
+
+    `stored` holds the lines kept for the pack (bounded by the store
+    cap); `overflow` counts claimed lines past that cap. `repeats`
+    and `repeat_ranges` record consecutive same-signature lines that
+    were collapsed in place, and `line_counts` keeps the exact
+    per-signature occurrence count for every claimed line.
+    """
     start_line: int
     end_line: int = 0
     match_line: int = 0
@@ -61,6 +70,12 @@ class Window:
 
 @dataclass
 class DupGroup:
+    """One duplicate group: lines sharing a near-duplicate signature.
+
+    `exemplar` is the first occurrence, verbatim. `occurrences` is the
+    exact total; `exact_copies` is how many of those were
+    byte-identical to the exemplar, so over-grouping stays visible.
+    """
     signature: str
     exemplar: str
     exemplar_line: int
@@ -72,6 +87,14 @@ class DupGroup:
 
 @dataclass
 class Analysis:
+    """The result of one streaming pass over a source log.
+
+    Carries the source identity (path, bytes, sha256), the timeline
+    anchors, the error windows, and the duplicate table. Every source
+    line is accounted for exactly once across windows and duplicate
+    accounting; pack.py turns that partition into the reconciled
+    kept / collapsed / dropped counts.
+    """
     source_path: str
     source_bytes: int
     source_sha256: str
@@ -92,6 +115,17 @@ class Analysis:
     # dropped member of its group.
     first_dup_signature: str | None = None
     last_dup_signature: str | None = None
+    # Evidence overview tallies, counted once per source line at the
+    # point matches are first computed (before any window claim,
+    # suppression, or duplicate accounting), so they describe the
+    # whole file exactly and never interact with the kept /
+    # collapsed / dropped partition. See Analysis properties below.
+    matched_lines: int = 0
+    pattern_counts: dict = field(default_factory=dict)
+    severity_counts: dict = field(default_factory=dict)
+    timeline_buckets: list = field(default_factory=list)
+    lines_with_timestamp: int = 0
+    matched_lines_without_timestamp: int = 0
 
     @property
     def singleton_lines(self) -> int:
@@ -171,6 +205,15 @@ def signature_of(text: str) -> str:
 
 def analyze(path, patterns: list[Pattern], window_before: int = 3,
             window_after: int = 5) -> Analysis:
+    """Analyse one log file in a single streaming pass and return an Analysis.
+
+    `patterns` is the full pattern list to match (built-ins plus any
+    custom patterns). A match opens a window with `window_before`
+    lines of context before it and `window_after` lines after it;
+    stack-trace continuations are absorbed past the after-count, up
+    to a per-window cap. The file is read line by line and is never
+    modified, moved, or loaded whole.
+    """
     path = Path(path)
     sha = hashlib.sha256()
     total_lines = 0
@@ -190,6 +233,15 @@ def analyze(path, patterns: list[Pattern], window_before: int = 3,
     groups: dict[str, DupGroup] = {}
     dup_accounted = 0
     pending: deque = deque()
+
+    # Evidence overview accumulators (counts only; no line text is
+    # retained, so the overview adds no redaction surface).
+    ov_matched_lines = 0
+    ov_pattern_counts: dict[str, int] = {}
+    ov_severity_counts: dict[int, int] = {}
+    ov_buckets: dict[str, dict] = {}
+    ov_lines_with_ts = 0
+    ov_matched_without_ts = 0
 
     gated = [p for p in patterns if p.builtin]
     ungated = [p for p in patterns if not p.builtin]
@@ -284,6 +336,40 @@ def analyze(path, patterns: list[Pattern], window_before: int = 3,
             else:
                 matches = [p for p in patterns if p.regex.search(text)]
 
+            # Evidence overview: count this line once, here, before
+            # any claim decision below can consume, extend, or
+            # suppress its matches. A line counts once toward
+            # matched_lines and once toward its highest matched
+            # severity; it counts once per pattern it matches in
+            # pattern_counts. Its hour bucket (when it carries a
+            # recognised timestamp) counts the line and, when it
+            # matched, the match and the bucket's highest severity.
+            bucket_label = hour_bucket(ts) if ts is not None else None
+            if bucket_label is not None:
+                ov_lines_with_ts += 1
+                bucket = ov_buckets.get(bucket_label)
+                if bucket is None:
+                    bucket = ov_buckets[bucket_label] = {
+                        "bucket": bucket_label, "first_line": no,
+                        "last_line": no, "lines": 0, "matched_lines": 0,
+                        "max_severity": 0}
+                bucket["last_line"] = no
+                bucket["lines"] += 1
+            if matches:
+                ov_matched_lines += 1
+                top_severity = max(m.severity for m in matches)
+                ov_severity_counts[top_severity] = \
+                    ov_severity_counts.get(top_severity, 0) + 1
+                for m in matches:
+                    ov_pattern_counts[m.id] = \
+                        ov_pattern_counts.get(m.id, 0) + 1
+                if bucket_label is not None:
+                    bucket["matched_lines"] += 1
+                    if top_severity > bucket["max_severity"]:
+                        bucket["max_severity"] = top_severity
+                else:
+                    ov_matched_without_ts += 1
+
             if current is not None:
                 belongs = no <= planned_end
                 if not belongs and trace_absorbed < TRACE_ABSORB_CAP \
@@ -360,4 +446,11 @@ def analyze(path, patterns: list[Pattern], window_before: int = 3,
         suppressed_repeat_matches=suppressed,
         first_dup_signature=first_dup_sig,
         last_dup_signature=last_dup_sig if last_dup_no == total_lines else None,
+        matched_lines=ov_matched_lines,
+        pattern_counts=ov_pattern_counts,
+        severity_counts=ov_severity_counts,
+        timeline_buckets=sorted(ov_buckets.values(),
+                                key=lambda b: b["first_line"]),
+        lines_with_timestamp=ov_lines_with_ts,
+        matched_lines_without_timestamp=ov_matched_without_ts,
     )

@@ -66,7 +66,10 @@ def load_pattern_file(path) -> list[Pattern]:
     the file and line on any bad regex."""
     from pathlib import Path
     patterns: list[Pattern] = []
-    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise ValueError(f"{path}: cannot read pattern file: {exc}") from exc
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -87,6 +90,12 @@ def load_pattern_file(path) -> list[Pattern]:
 
 
 def compile_cli_patterns(regexes) -> list[Pattern]:
+    """Compile --pattern values into Patterns (ids cli-1, cli-2, ...).
+
+    Custom patterns are severity 2, kind custom, and are not gated
+    behind the builtin needle prefilter. Raises ValueError naming
+    the offending value on any bad regex.
+    """
     patterns: list[Pattern] = []
     for i, rx in enumerate(regexes or [], 1):
         try:
@@ -114,9 +123,37 @@ _TIMESTAMP_COMBINED = re.compile(
 
 
 def find_timestamp(text: str):
-    """Return the first recognised timestamp string in the line, or None."""
+    """Return the first recognised timestamp string in the line, or None.
+
+    Recognised forms are ISO 8601, syslog-style month names, and the
+    bracketed form; see _TIMESTAMP_RES. The matched text is returned
+    verbatim: no parsing or timezone conversion is attempted.
+    """
     m = _TIMESTAMP_COMBINED.search(text)
     return m.group(0) if m else None
+
+
+_ISO_BUCKET_RE = re.compile(r"(\d{4}-\d{2}-\d{2})[T ](\d{2})")
+_SYSLOG_BUCKET_RE = re.compile(
+    r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})"
+    r"\s+(\d{2})")
+
+
+def hour_bucket(ts_text: str):
+    """Hour-bucket label for a recognised timestamp string, derived
+    from the timestamp exactly as written: no timezone conversion
+    and no year invention. ISO/bracketed forms give
+    ``YYYY-MM-DDTHH:00``; syslog forms (which carry no year in the
+    source) give ``Mon DD HH:00 (syslog, no year in source)``.
+    Returns None for a string with no recognisable hour."""
+    m = _ISO_BUCKET_RE.search(ts_text)
+    if m:
+        return f"{m.group(1)}T{m.group(2)}:00"
+    m = _SYSLOG_BUCKET_RE.search(ts_text)
+    if m:
+        return (f"{m.group(1)} {int(m.group(2)):02d} {m.group(3)}:00 "
+                f"(syslog, no year in source)")
+    return None
 
 
 # Continuation lines absorbed into a stack trace: indented lines,
@@ -134,6 +171,13 @@ _FRAME_RES = [
 
 
 def is_continuation(text: str) -> bool:
+    """True if the line reads as a stack-trace continuation.
+
+    Any indented (space or tab) non-blank line qualifies, as do the
+    explicit frame shapes in _FRAME_RES (Python and Java frames,
+    Caused by chains, JVM elision lines). Used to absorb a trace
+    into the window that opened it.
+    """
     if not text.strip():
         return False
     if text[0] in (" ", "\t"):

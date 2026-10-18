@@ -1,7 +1,7 @@
 {
   "tool": "ghostlogs",
   "version": "0.1.0",
-  "generated_at": "2026-10-14T13:39:25.683742+00:00",
+  "generated_at": "2026-10-18T19:05:00.661610+00:00",
   "source": {
     "path": "examples/billing-api.log",
     "bytes": 1894,
@@ -11,7 +11,9 @@
   "token_method": "estimates (BPE-like split v2, per-language calibrated, not exact tokenizer counts)",
   "estimator_source": "ghostslice",
   "budget_tokens": 2000,
-  "pack_estimated_tokens": 752,
+  "budget_tier": "full",
+  "budget_tier_meaning": "Every selected window and duplicate exemplar is shown in full.",
+  "pack_estimated_tokens": 708,
   "over_budget": false,
   "estimated_tokens_in": 678,
   "counts": {
@@ -75,7 +77,8 @@
         "stored_lines": 12,
         "overflow_lines": 0,
         "repeat_lines_collapsed_in_window": 0,
-        "emitted": true
+        "emitted": true,
+        "trimmed_lines": 0
       }
     ]
   },
@@ -102,7 +105,10 @@
         "last_line": 21,
         "emitted": true
       }
-    ]
+    ],
+    "window_groups": 0,
+    "window_list_truncated": false,
+    "window_list": []
   },
   "patterns": [
     {
@@ -156,6 +162,8 @@
     "Near-duplicate grouping masks timestamps, numbers, hex ids, UUIDs, IPs, and quoted strings. Two different errors that differ only in a masked part share one exemplar; the byte-identical count is reported beside the total.",
     "Token figures are estimates from the stamped method, not a vendor tokenizer count.",
     "Window line storage is capped per run; lines past the cap are counted as dropped (window store cap), never silently lost.",
-    "The first burst of an error is windowed in full context; later bursts of the same error collapse into duplicate exemplars, and consecutive repeats inside a window collapse in place. Counts stay exact either way."
+    "The first burst of an error is windowed in full context; later bursts of the same error collapse into duplicate exemplars, and consecutive repeats inside a window collapse in place. Either way the exact occurrence count is stated in the manifest and in the Repeated lines section.",
+    "If a pack had to descend the budget tiers to fit, the manifest records which tier shipped (budget_tier) and what the tier means (budget_tier_meaning), and INCIDENT.md states the tier on its face. Lines trimmed from a window to fit are counted under windows not fitted, never silently lost.",
+    "Secret-shape redaction is exact about lengths by design: the aws-access-key shape is AKIA or ASIA plus exactly 16 characters (20 in total, the same shape GhostSlice's guard uses), so a longer or shorter look-alike is not that shape. Other provider shapes are minimum-length, and a generic assignment needs a sensitive-looking name plus a value of at least 8 characters with at least 4 distinct characters. Redaction lowers risk; it is not a guarantee that every credential form is caught."
   ]
 }
